@@ -57,6 +57,13 @@
               # whatever Command Line Tools happen to be on the host.
               pkgs.rustPlatform.bindgenHook
               pkgs.writableTmpDirAsHomeHook
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              # Both used by postFixup: the hook defines the
+              # `addDriverRunpath` shell function, makeWrapper the
+              # `wrapProgram` one.
+              pkgs.addDriverRunpath
+              pkgs.makeWrapper
             ];
 
             # GPUI's Linux backends link and run against these; macOS needs
@@ -77,6 +84,22 @@
 
             # GPUI dlopens libvulkan, libEGL and libwayland-client at
             # runtime; dlopen ignores buildInputs, so point RUNPATH at them.
+            #
+            # Finding those loaders is only half of it: each one then has to
+            # find a *driver*, which it discovers through a JSON manifest
+            # naming the vendor library. On NixOS those manifests live under
+            # `/run/opengl-driver`, the path `addDriverRunpath` appends; on
+            # every other distribution that path does not exist, the system's
+            # own manifests are invisible to a Nix-built loader, and
+            # wgpu comes up with no backend at all — `create_surface` fails
+            # with "Failed to create surface for any enabled backend: {}"
+            # before a window is ever shown. Naming this closure's Mesa as an
+            # *additional* source of drivers fixes those hosts and changes
+            # nothing on NixOS: `VK_ADD_DRIVER_FILES` is searched after the
+            # ICDs the loader discovers for itself, and the two GL variables
+            # are suffixed rather than set. A machine driven by the
+            # proprietary NVIDIA stack is the exception — Mesa cannot drive
+            # that card, so those need nixGL or an equivalent.
             postFixup = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
               patchelf --add-rpath ${
                 pkgs.lib.makeLibraryPath [
@@ -85,6 +108,11 @@
                   pkgs.wayland
                 ]
               } $out/bin/disktree
+              addDriverRunpath $out/bin/disktree
+              wrapProgram $out/bin/disktree \
+                --suffix VK_ADD_DRIVER_FILES : ${pkgs.mesa}/share/vulkan/icd.d \
+                --suffix __EGL_VENDOR_LIBRARY_DIRS : ${pkgs.mesa}/share/glvnd/egl_vendor.d \
+                --suffix LIBGL_DRIVERS_PATH : ${pkgs.mesa}/lib/dri
             '';
 
             # Matches `make install` on Linux: icon and desktop entry.
